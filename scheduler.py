@@ -126,14 +126,6 @@ INITIAL_CAPITAL: float = 1_000_000.0
 
 def load_config() -> dict:
     defaults = {
-        "price_move_threshold_pct": 2.0,
-        "operate_cooldown_minutes": 30,
-        "fetch_interval_seconds": 60,
-        "market_open": "09:30",
-        "market_close": "15:00",
-        "archive_time": "15:10",
-        "weekly_archive_time": "15:15",
-        "timezone": "Asia/Shanghai",
     }
     if CONFIG_FILE.exists():
         try:
@@ -529,8 +521,8 @@ def job_fetch_and_check(cfg: dict, state: dict) -> None:
         trigger_operate(cfg, f"波动触发 {', '.join(triggered)}，执行 /operate")
 
 
-def job_market_open(cfg: dict) -> None:
-    trigger_operate(cfg, "开盘触发 /operate")
+def job_operate(cfg: dict) -> None:
+    trigger_operate(cfg, "定时触发 /operate")
 
 
 def job_daily_archive(cfg: dict) -> None:
@@ -872,17 +864,18 @@ def input_thread_func(cfg: dict) -> None:
 
 def schedule_thread(cfg: dict, state: dict) -> None:
     iv   = cfg["fetch_interval_seconds"]
-    open_t    = cfg["market_open"]
     arc_t     = cfg["archive_time"]
     warc_t    = cfg["weekly_archive_time"]
+    operate_time_list = cfg["operate_time_list"]
 
     schedule.every(iv).seconds.do(job_fetch_and_check, cfg=cfg, state=state)
-    schedule.every().day.at(open_t).do(job_market_open,    cfg=cfg)
+    for opr_t in operate_time_list:
+        schedule.every().day.at(opr_t).do(job_operate,    cfg=cfg)
     schedule.every().day.at(arc_t).do(job_daily_archive,   cfg=cfg)
     schedule.every().friday.at(warc_t).do(job_weekly_archive, cfg=cfg)
 
     log_event(
-        f"调度器就绪 | 拉取:{iv}s | 开盘:{open_t} | "
+        f"调度器就绪 | 拉取:{iv}s | 定时操作:{operate_time_list} | "
         f"日归档:{arc_t} | 周归档(周五):{warc_t}"
     )
 

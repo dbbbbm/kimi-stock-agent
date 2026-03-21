@@ -6,5 +6,6 @@
   "market_close": "15:00",
   "archive_time": "15:05",
   "weekly_archive_time": "15:15",
+  "operate_time_list": ["11:00", "14:00"],
   "timezone": "Asia/Shanghai"
 }
