@@ -1,0 +1,10 @@
+{
+  "price_move_threshold_pct": 2.0,
+  "operate_cooldown_minutes": 30,
+  "fetch_interval_seconds": 60,
+  "market_open": "09:30",
+  "market_close": "15:00",
+  "archive_time": "15:10",
+  "weekly_archive_time": "15:15",
+  "timezone": "Asia/Shanghai"
+}
