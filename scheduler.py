@@ -11,8 +11,11 @@
   - 实时展示股票指标、触发事件、claude 输出
 """
 
+import ctypes
+import ctypes.wintypes as wintypes
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,6 +23,63 @@ import time
 from collections import deque
 from datetime import datetime, time as dtime
 from pathlib import Path
+
+# ─── Windows Console API structures (keyboard + mouse input) ─────────────────
+
+_kernel32 = ctypes.windll.kernel32
+
+_STD_INPUT_HANDLE    = -10
+_ENABLE_MOUSE_INPUT  = 0x0010
+_ENABLE_EXTENDED_FLAGS = 0x0080
+_KEY_EVENT           = 0x0001
+_MOUSE_EVENT         = 0x0002
+_MOUSE_WHEELED       = 0x0004
+_VK_RETURN           = 0x0D
+_VK_BACK             = 0x08
+_VK_ESCAPE           = 0x1B
+_VK_UP               = 0x26
+_VK_DOWN             = 0x28
+_FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001
+_ENABLE_QUICK_EDIT_MODE       = 0x0040   # must be disabled to receive mouse events
+
+
+class _COORD(ctypes.Structure):
+    _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+
+class _MOUSE_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("dwMousePosition",   _COORD),
+        ("dwButtonState",     ctypes.c_ulong),
+        ("dwControlKeyState", ctypes.c_ulong),
+        ("dwEventFlags",      ctypes.c_ulong),
+    ]
+
+
+class _KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("bKeyDown",          ctypes.c_long),
+        ("wRepeatCount",      ctypes.c_ushort),
+        ("wVirtualKeyCode",   ctypes.c_ushort),
+        ("wVirtualScanCode",  ctypes.c_ushort),
+        ("uChar",             ctypes.c_wchar),
+        ("dwControlKeyState", ctypes.c_ulong),
+    ]
+
+
+class _EVENT_UNION(ctypes.Union):
+    _fields_ = [
+        ("KeyEvent",   _KEY_EVENT_RECORD),
+        ("MouseEvent", _MOUSE_EVENT_RECORD),
+        ("_pad",       ctypes.c_byte * 20),
+    ]
+
+
+class _INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", ctypes.c_ushort),
+        ("Event",     _EVENT_UNION),
+    ]
 
 import schedule
 import pytz
@@ -53,6 +113,10 @@ last_fetch_ok: bool   = True
 market_status: str    = "启动中"
 last_operate_dt: datetime | None = None
 portfolio_codes: list = []          # refreshed every fetch cycle
+session_date: str     = ""          # date of current claude session (YYYY-MM-DD)
+input_buffer: str     = ""          # current user input being typed
+scroll_offsets: dict  = {"claude": 9999, "events": 9999, "stocks": 0, "pnl": 0}
+focused_panel: str    = "claude"    # panel currently selected for keyboard scrolling
 positions_cache: dict = {}          # {code: {name, shares, cost}} from MY.md
 available_cash: float = 0.0         # parsed from MY.md 资金情况
 INITIAL_CAPITAL: float = 1_000_000.0
@@ -106,15 +170,77 @@ def now_tz(tz_name: str) -> datetime:
     return datetime.now(pytz.timezone(tz_name))
 
 
+_EVENTS_VISIBLE = 28   # keep in sync with _PANEL_VISIBLE["events"]
+
 def log_event(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     with _lock:
-        event_log.appendleft(f"[{ts}] {msg}")
+        prev_len = len(event_log)
+        event_log.append(f"[{ts}] {msg}")
+        # Auto-scroll if user was at (or near) the bottom
+        was_at_bottom = scroll_offsets["events"] >= max(0, prev_len - _EVENTS_VISIBLE - 2)
+        if was_at_bottom:
+            scroll_offsets["events"] = max(0, len(event_log) - _EVENTS_VISIBLE)
 
+
+_CLAUDE_VISIBLE = 35   # visible lines in claude panel
 
 def append_claude(line: str) -> None:
     with _lock:
+        prev_len = len(claude_buf)
         claude_buf.append(line.rstrip("\n\r"))
+        # Auto-scroll if user was at (or near) the bottom
+        was_at_bottom = scroll_offsets["claude"] >= max(0, prev_len - _CLAUDE_VISIBLE - 2)
+        if was_at_bottom:
+            scroll_offsets["claude"] = max(0, len(claude_buf) - _CLAUDE_VISIBLE)
+
+
+def _init_console_input() -> None:
+    """Enable mouse input; disable Quick Edit Mode (which intercepts all mouse clicks)."""
+    try:
+        h = _kernel32.GetStdHandle(_STD_INPUT_HANDLE)
+        mode = ctypes.c_ulong(0)
+        _kernel32.GetConsoleMode(h, ctypes.byref(mode))
+        new_mode = (mode.value | _ENABLE_MOUSE_INPUT | _ENABLE_EXTENDED_FLAGS) \
+                   & ~_ENABLE_QUICK_EDIT_MODE
+        _kernel32.SetConsoleMode(h, new_mode)
+    except Exception:
+        pass
+
+
+def _get_panel_at(x: int, y: int) -> str | None:
+    """Map terminal (x, y) to a panel name using the known layout ratios."""
+    w, h = shutil.get_terminal_size(fallback=(120, 30))
+    header_end  = 3
+    input_start = max(header_end + 4, h - 5)
+    content_h   = input_start - header_end
+    top_h       = max(1, content_h * 2 // 5)
+    bottom_start = header_end + top_h
+    mid_x = w * 3 // 5          # stocks/claude take 3/5, pnl/events take 2/5
+
+    if y < header_end or y >= input_start:
+        return None
+    elif y < bottom_start:
+        return "stocks" if x < mid_x else "pnl"
+    else:
+        return "claude" if x < mid_x else "events"
+
+
+_PANEL_VISIBLE = {"claude": 35, "events": 28, "stocks": 15, "pnl": 10}
+
+
+def _scroll_panel(panel: str, direction: int) -> None:
+    """Scroll panel by direction (+1 down, -1 up), 3 lines per notch."""
+    content_len = {
+        "claude": len(claude_buf),
+        "events": len(event_log),
+        "stocks": len(stock_rows),
+        "pnl":    len(positions_cache),
+    }.get(panel, 0)
+    visible    = _PANEL_VISIBLE.get(panel, 20)
+    max_offset = max(0, content_len - visible)
+    with _lock:
+        scroll_offsets[panel] = max(0, min(scroll_offsets[panel] + direction * 3, max_offset))
 
 
 def is_market_open(cfg: dict) -> bool:
@@ -236,7 +362,7 @@ def is_trading_day(rows: list, tz_name: str) -> bool:
 
 def run_claude_command(cmd: str, cfg: dict) -> None:
     """Run a claude slash command in a background thread, streaming output to UI."""
-    global is_running, current_cmd, last_operate_dt
+    global is_running, current_cmd, last_operate_dt, session_date
 
     with _lock:
         if is_running:
@@ -253,14 +379,27 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
         current_cmd = cmd
         claude_buf.clear()
 
-    log_event(f"启动 → {cmd}")
+    # Decide whether to continue today's session or start a new one
+    today = datetime.now().strftime("%Y-%m-%d")
+    if session_date == today:
+        claude_args = ["claude", "--continue", "-p", cmd]
+        session_note = "续接今日会话"
+    else:
+        claude_args = ["claude", "-p", cmd]
+        session_note = "新建会话"
+        session_date = today
+        state = load_state()
+        state["session_date"] = today
+        save_state(state)
+
+    log_event(f"启动 → {cmd}（{session_note}）")
     append_claude(f"{'─'*60}")
-    append_claude(f"▶  {cmd}  [{datetime.now().strftime('%H:%M:%S')}]")
+    append_claude(f"▶  {cmd}  [{datetime.now().strftime('%H:%M:%S')}]  {session_note}")
     append_claude(f"{'─'*60}")
 
     try:
         proc = subprocess.Popen(
-            ["claude", "-p", cmd],
+            claude_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -446,6 +585,12 @@ def build_stock_table() -> Panel:
     table.add_column("量比",   width=5,  justify="right")
     table.add_column("更新日期", width=11, justify="right")
 
+    with _lock:
+        off = scroll_offsets["stocks"]
+    visible = _PANEL_VISIBLE["stocks"]
+    off  = min(off, max(0, len(rows) - visible))
+    rows = rows[off: off + visible]
+
     for row in rows:
         code  = str(row.get("股票代码", "")).zfill(6)
         name  = str(row.get("股票名称", ""))[:4]
@@ -471,8 +616,12 @@ def build_stock_table() -> Panel:
         table.add_row(code, name, price_s, chg_text,
                       ma5_s, dif_s, vr_s, upd, style=row_style)
 
-    title = f"[bold]股票池[/]（[cyan]{len(rows)}[/] 只，持仓 [yellow]{len(portfolio)}[/] 只）"
-    return Panel(table, title=title, border_style="blue")
+    with _lock:
+        focused = focused_panel == "stocks"
+    suffix = f" ↕{off}" if off else ""
+    focus_tag = " [bold white]◀[/]" if focused else ""
+    title = f"[bold]股票池[/]（[cyan]{len(rows)}[/] 只，持仓 [yellow]{len(portfolio)}[/] 只）{suffix}{focus_tag}"
+    return Panel(table, title=title, border_style="bright_blue" if focused else "blue")
 
 
 def build_pnl_panel() -> Panel:
@@ -496,18 +645,28 @@ def build_pnl_panel() -> Panel:
     table.add_column("盈亏%", width=7,  justify="right")
     table.add_column("盈亏额", width=10, justify="right")
 
+    with _lock:
+        off_pnl = scroll_offsets["pnl"]
+    pos_items = list(positions.items())
+    off_pnl   = min(off_pnl, max(0, len(pos_items) - _PANEL_VISIBLE["pnl"]))
+    pos_items = pos_items[off_pnl: off_pnl + _PANEL_VISIBLE["pnl"]]
+
     total_market_value = 0.0
+    # still accumulate full positions for totals (use original positions dict)
     for code, pos in positions.items():
+        price = price_map.get(code)
+        if price:
+            total_market_value += price * pos["shares"]
+
+    for code, pos in pos_items:
         name   = pos["name"][:4]
         shares = pos["shares"]
         cost   = pos["cost"]
         price  = price_map.get(code)
 
         if price:
-            mv      = price * shares
             pnl_pct = (price - cost) / cost * 100
             pnl_amt = (price - cost) * shares
-            total_market_value += mv
             color = "red" if pnl_pct > 0 else ("green" if pnl_pct < 0 else "white")
             table.add_row(
                 name, f"{price:.2f}", f"{cost:.2f}",
@@ -530,34 +689,78 @@ def build_pnl_panel() -> Panel:
         f"[bold]累计[/] [{pnl_color}]{total_pnl:+,.0f}[/] "
         f"[{pnl_color}]({total_pnl_pct:+.2f}%)[/]"
     )
-    return Panel(Group(table, summary), title="[bold]实时持仓收益[/]",
-                 border_style="magenta")
+    with _lock:
+        focused = focused_panel == "pnl"
+    focus_tag = " [bold white]◀[/]" if focused else ""
+    return Panel(Group(table, summary), title=f"[bold]实时持仓收益[/]{focus_tag}",
+                 border_style="bright_magenta" if focused else "magenta")
 
 
 def build_event_log() -> Panel:
     with _lock:
         lines = list(event_log)
-    text = "\n".join(lines[:28]) if lines else "[dim]暂无事件[/]"
-    return Panel(text, title="[bold]触发事件[/]", border_style="yellow")
+        off   = scroll_offsets["events"]
+    visible = _PANEL_VISIBLE["events"]
+    off = min(off, max(0, len(lines) - visible))
+    sliced = lines[off: off + visible]
+    text = "\n".join(sliced) if sliced else "[dim]暂无事件[/]"
+    with _lock:
+        focused = focused_panel == "events"
+    suffix = f" ↕{off}" if off else ""
+    focus_tag = " [bold white]◀[/]" if focused else ""
+    return Panel(text, title=f"[bold]触发事件[/]{suffix}{focus_tag}",
+                 border_style="bright_yellow" if focused else "yellow")
 
 
 def build_claude_panel() -> Panel:
     with _lock:
-        lines = list(claude_buf)
+        lines   = list(claude_buf)
         running = is_running
-        cmd = current_cmd
+        cmd     = current_cmd
+        off     = scroll_offsets["claude"]
 
-    visible = lines[-35:] if len(lines) > 35 else lines
-    body = "\n".join(visible) if visible else "[dim]等待 claude 输出...[/]"
+    visible = _CLAUDE_VISIBLE
+    off = min(off, max(0, len(lines) - visible))
+    sliced = lines[off: off + visible]
+    body = "\n".join(sliced) if sliced else "[dim]等待 claude 输出...[/]"
+    at_bottom = off >= max(0, len(lines) - visible - 2)
+    scroll_tag = "" if at_bottom else f" ↑{off}"
+
+    with _lock:
+        focused = focused_panel == "claude"
+    focus_tag = " [bold white]◀[/]" if focused else ""
 
     if running:
-        title = f"[bold yellow]Claude 输出 — 运行中：{cmd}[/]"
-        border = "yellow"
+        title  = f"[bold yellow]Claude 输出 — 运行中：{cmd}{scroll_tag}{focus_tag}[/]"
+        border = "bright_yellow" if focused else "yellow"
     else:
-        title = "[bold]Claude 输出[/]"
-        border = "green"
+        title  = f"[bold]Claude 输出[/]{scroll_tag}{focus_tag}"
+        border = "bright_green" if focused else "green"
 
     return Panel(body, title=title, border_style=border)
+
+
+def build_input_panel() -> Panel:
+    with _lock:
+        buf     = input_buffer
+        running = is_running
+        sd      = session_date
+        fp      = focused_panel
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    session_tag = "[green]续接今日会话[/]" if sd == today else "[dim]新会话（首次发送后建立）[/]"
+    panel_names = {"claude": "Claude输出", "events": "触发事件", "stocks": "股票池", "pnl": "持仓收益"}
+    focus_hint  = f"[bold white]↑↓ 滚动「{panel_names.get(fp, fp)}」[/] · 点击面板切换"
+
+    if running:
+        body = Text.from_markup(f"[dim]Claude 运行中，请稍候...[/]\n{focus_hint}")
+    else:
+        body = Text.from_markup(
+            f"[bold cyan]>[/] {buf}[blink]▌[/]\n"
+            f"[dim]Enter 发送 · Esc 清空 · /new 新建对话 · {session_tag}[/]\n"
+            f"{focus_hint}"
+        )
+    return Panel(body, title="[bold]对话[/]", border_style="cyan", height=6)
 
 
 def render(cfg: dict) -> Layout:
@@ -566,6 +769,7 @@ def render(cfg: dict) -> Layout:
         Layout(name="header", size=3),
         Layout(name="top",    ratio=2),
         Layout(name="bottom", ratio=3),
+        Layout(name="input",  size=6),
     )
     layout["top"].split_row(
         Layout(name="stocks", ratio=3),
@@ -580,7 +784,88 @@ def render(cfg: dict) -> Layout:
     layout["pnl"].update(build_pnl_panel())
     layout["claude"].update(build_claude_panel())
     layout["events"].update(build_event_log())
+    layout["input"].update(build_input_panel())
     return layout
+
+
+# ─── Input thread ────────────────────────────────────────────────────────────
+
+def input_thread_func(cfg: dict) -> None:
+    """Handle keyboard + mouse wheel via Windows ReadConsoleInputW."""
+    global input_buffer, session_date, focused_panel
+
+    # Wait for rich.Live to finish its console setup, then override
+    time.sleep(1.5)
+    _init_console_input()
+    h       = _kernel32.GetStdHandle(_STD_INPUT_HANDLE)
+    record  = _INPUT_RECORD()
+    n_read  = ctypes.c_ulong(0)
+
+    while True:
+        try:
+            # Block up to 100 ms waiting for an input event
+            if _kernel32.WaitForSingleObject(h, 20) != 0:
+                continue
+            _kernel32.ReadConsoleInputW(h, ctypes.byref(record), 1, ctypes.byref(n_read))
+            if n_read.value == 0:
+                continue
+
+            # ── Keyboard ─────────────────────────────────────────────────────
+            if record.EventType == _KEY_EVENT and record.Event.KeyEvent.bKeyDown:
+                vk = record.Event.KeyEvent.wVirtualKeyCode
+                ch = record.Event.KeyEvent.uChar
+
+                if vk == _VK_UP:                            # ↑ scroll focused panel up
+                    _scroll_panel(focused_panel, -1)
+                elif vk == _VK_DOWN:                        # ↓ scroll focused panel down
+                    _scroll_panel(focused_panel, 1)
+                elif vk == _VK_RETURN:                      # Enter → submit input
+                    with _lock:
+                        text = input_buffer
+                        input_buffer = ""
+                    text = text.strip()
+                    if text == "/new":
+                        session_date = ""
+                        st = load_state()
+                        st["session_date"] = ""
+                        save_state(st)
+                        log_event("已重置 session，下次发送将创建新对话")
+                    elif text:
+                        log_event(f"用户发送：{text[:50]}")
+                        threading.Thread(
+                            target=run_claude_command, args=(text, cfg), daemon=True
+                        ).start()
+                elif vk == _VK_BACK:                        # Backspace
+                    with _lock:
+                        input_buffer = input_buffer[:-1]
+                elif vk == _VK_ESCAPE:                      # Escape → clear
+                    with _lock:
+                        input_buffer = ""
+                elif ch and ch.isprintable():               # Printable char
+                    with _lock:
+                        input_buffer += ch
+
+            # ── Mouse: left-click → focus panel; wheel → scroll ──────────────
+            elif record.EventType == _MOUSE_EVENT:
+                flags = record.Event.MouseEvent.dwEventFlags
+                btn   = record.Event.MouseEvent.dwButtonState
+                mx    = record.Event.MouseEvent.dwMousePosition.X
+                my    = record.Event.MouseEvent.dwMousePosition.Y
+                panel = _get_panel_at(mx, my)
+
+                if flags == 0 and (btn & _FROM_LEFT_1ST_BUTTON_PRESSED):
+                    # Left click → set focus
+                    if panel:
+                        focused_panel = panel
+
+                elif flags & _MOUSE_WHEELED:
+                    # Wheel → scroll whichever panel the cursor is over
+                    target = panel or focused_panel
+                    delta  = ctypes.c_short((btn >> 16) & 0xFFFF).value
+                    _scroll_panel(target, -1 if delta > 0 else 1)
+
+        except Exception as e:
+            log_event(e)
 
 
 # ─── Schedule thread ──────────────────────────────────────────────────────────
@@ -612,10 +897,11 @@ def main() -> None:
     cfg   = load_config()
     state = load_state()
 
-    # seed portfolio codes and positions once at startup
-    global portfolio_codes, positions_cache, available_cash
+    # seed portfolio codes, positions and session state once at startup
+    global portfolio_codes, positions_cache, available_cash, session_date
     portfolio_codes = refresh_portfolio_codes()
     positions_cache, available_cash = parse_my_md()
+    session_date = state.get("session_date", "")
 
     # seed stock display from existing xlsx (no blocking fetch at startup)
     rows = read_stocks_xlsx()
@@ -625,13 +911,14 @@ def main() -> None:
         with _lock:
             stock_rows[:] = rows
 
-    # start schedule thread
-    t = threading.Thread(target=schedule_thread, args=(cfg, state), daemon=True)
-    t.start()
+    _init_console_input()
+    # start schedule thread and input thread
+    threading.Thread(target=schedule_thread,   args=(cfg, state), daemon=True).start()
+    threading.Thread(target=input_thread_func, args=(cfg,),       daemon=True).start()
 
     console = Console()
     try:
-        with Live(render(cfg), console=console, refresh_per_second=1,
+        with Live(render(cfg), console=console, refresh_per_second=60,
                   screen=True) as live:
             while True:
                 live.update(render(cfg))
