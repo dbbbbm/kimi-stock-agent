@@ -2,8 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 股票数据自动获取脚本
-功能：读取 stocks.xlsx 中的股票列表，自动获取最新技术指标，更新到 xlsx
+功能：
+  - 读取 stocks.xlsx 中的股票列表，自动获取最新技术指标，更新到 xlsx
+  - 获取大盘指数（上证/深证/创业板/沪深300）技术指标，写入 index.xlsx
 数据源：akshare（免费，无需注册）
+用法：
+  python fetch_stocks.py              # 更新个股 + 大盘指数
+  python fetch_stocks.py --index      # 只更新大盘指数
+  python fetch_stocks.py --back 3     # 获取3天前的数据
+  python fetch_stocks.py --get-recent 7  # 批量获取最近7个交易日（自动跳过非交易日）
 作者：Claude
 """
 
@@ -184,6 +191,130 @@ def get_stock_data(code, name=None):
 
 DAYS_BACK = 0
 
+
+def get_recent_trading_offsets(n):
+    """
+    返回最近 n 个交易日距今的 DAYS_BACK 偏移列表（从旧到新排序）
+    例如：今天是周一，最近3个交易日 → [3, 4, 5]（对应上周五、周四、周三）
+    失败时回退到自然日模式（不过滤非交易日）
+    """
+    try:
+        df = ak.tool_trade_date_hist_sina()
+        dates = pd.to_datetime(df.iloc[:, 0]).sort_values()
+        today = datetime.now().date()
+        past_dates = dates[dates.dt.date < today]
+        recent = past_dates.tail(n)
+        offsets = sorted([(today - d.date()).days for d in recent], reverse=True)
+        print(f"📅 交易日历加载成功，最近 {n} 个交易日: "
+              f"{[str((datetime.now() - timedelta(days=o)).date()) for o in offsets]}")
+        return offsets
+    except Exception as e:
+        print(f"⚠️  获取交易日历失败: {e}，回退到自然日模式")
+        return list(range(n, 0, -1))
+
+
+# 大盘指数列表（akshare 格式）
+INDEX_LIST = [
+    {"symbol": "sh000001", "name": "上证综指"},
+    {"symbol": "sz399001", "name": "深证成指"},
+    {"symbol": "sz399006", "name": "创业板指"},
+    {"symbol": "sh000300", "name": "沪深300"},
+]
+
+
+def get_index_data(symbol, name):
+    """获取指数技术指标"""
+    global DAYS_BACK
+    try:
+        end_date = datetime.now() - timedelta(days=DAYS_BACK)
+
+        df = ak.stock_zh_index_daily(symbol=symbol)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df[df['date'] <= end_date].tail(60).copy()
+        df = df.rename(columns={
+            'close': '收盘', 'open': '开盘',
+            'high': '最高', 'low': '最低', 'volume': '成交量'
+        })
+
+        if df.empty:
+            return None
+
+        latest = df.iloc[-1]
+        mas = calculate_ma(df)
+        macd_dif, macd_dea = calculate_macd(df)
+        volume_ma = calculate_volume_ma(df)
+        prev_close = df.iloc[-2]['收盘'] if len(df) > 1 else latest['收盘']
+        change_pct = round((latest['收盘'] - prev_close) / prev_close * 100, 2)
+        volume_ratio = round(latest['成交量'] / (volume_ma * 10000), 2) if volume_ma else 1.0
+
+        return {
+            '指数代码': symbol,
+            '指数名称': name,
+            '现价': round(latest['收盘'], 2),
+            '涨跌幅': change_pct,
+            'MA5': mas.get('MA5'),
+            'MA10': mas.get('MA10'),
+            'MA20': mas.get('MA20'),
+            'MACD_DIF': macd_dif,
+            'MACD_DEA': macd_dea,
+            '成交量(万)': round(latest['成交量'] / 10000, 2),
+            '均量(万)': volume_ma,
+            '量比': volume_ratio,
+            '更新日期': end_date.strftime('%Y-%m-%d'),
+            'DAYS_BACK': DAYS_BACK,
+        }
+    except Exception as e:
+        print(f"获取 {name}({symbol}) 失败: {e}")
+        return None
+
+
+def update_index_excel(output_file='index.xlsx', save_to_data_dir=True):
+    """获取所有大盘指数数据，写入 index.xlsx"""
+    global DAYS_BACK
+
+    data_date = datetime.now() - timedelta(days=DAYS_BACK)
+    timestamp = data_date.strftime('%Y%m%d_%H%M%S')
+
+    print(f"\n{'='*60}")
+    print(f"大盘指数数据更新")
+    print(f"{'='*60}\n")
+
+    index_data = []
+    for idx in INDEX_LIST:
+        print(f"正在获取 {idx['name']}({idx['symbol']})...")
+        data = get_index_data(idx['symbol'], idx['name'])
+        if data:
+            index_data.append(data)
+            print(f"  ✅ {idx['name']} 现价:{data['现价']} 涨跌幅:{data['涨跌幅']}%")
+        else:
+            print(f"  ❌ {idx['name']} 获取失败")
+        time.sleep(0.3)
+
+    if not index_data:
+        print("❌ 所有指数数据获取失败")
+        return
+
+    df_index = pd.DataFrame(index_data)
+
+    try:
+        df_index.to_excel(output_file, index=False, sheet_name='大盘指标')
+        print(f"\n✅ 大盘指标已保存: {output_file}")
+
+        if save_to_data_dir:
+            data_dir = 'indices'
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir)
+            ts_path = os.path.join(data_dir, f"index_{timestamp}.xlsx")
+            df_index.to_excel(ts_path, index=False, sheet_name='大盘指标')
+            print(f"历史版本: {ts_path}")
+
+        print("\n📊 大盘指标汇总:")
+        print(df_index[['指数名称', '现价', '涨跌幅', 'MA5', 'MACD_DIF', 'MACD_DEA']].to_string(index=False))
+
+    except Exception as e:
+        print(f"保存 {output_file} 失败: {e}")
+
+
 def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data_dir=True):
     """
     主函数：读取 stocks.xlsx，更新数据，写回文件
@@ -339,26 +470,36 @@ if __name__ == '__main__':
         if sys.argv[1] == '--create-sample':
             # 创建示例文件
             create_sample_excel()
+        elif sys.argv[1] == '--index':
+            # 只更新大盘指数
+            # 用法: python fetch_stocks.py --index
+            update_index_excel()
         elif sys.argv[1] == '--back':
             # 获取指定天数前的数据
             # 用法: python fetch_stocks.py --back 3
             DAYS_BACK = int(sys.argv[2]) if len(sys.argv) > 2 else 1
             print(f"🔄 获取 {DAYS_BACK} 天前的数据...")
             update_stocks_excel()
+            update_index_excel()
         elif sys.argv[1] == '--get-recent':
-            # 获取最近N天的历史数据（批量获取）
+            # 获取最近N个交易日的历史数据（跳过非交易日）
             # 用法: python fetch_stocks.py --get-recent 7
             days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-            print(f"🔄 批量获取最近 {days} 天的历史数据...\n")
-            for i in range(1, days + 1):
-                DAYS_BACK = i
-                print(f"\n[{i}/{days}] ", end="")
+            print(f"🔄 批量获取最近 {days} 个交易日的历史数据（跳过非交易日）...\n")
+            offsets = get_recent_trading_offsets(days)
+            for i, offset in enumerate(offsets, 1):
+                DAYS_BACK = offset
+                data_date = datetime.now() - timedelta(days=DAYS_BACK)
+                print(f"\n[{i}/{len(offsets)}] {data_date.strftime('%Y-%m-%d')}")
                 update_stocks_excel()
+                update_index_excel()
                 time.sleep(1)  # 批次间延时
-            print(f"\n✅ 完成！共获取 {days} 天的历史数据")
+            print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
         else:
             print("未知参数，使用默认模式")
             update_stocks_excel()
+            update_index_excel()
     else:
         # 正常更新数据（DAYS_BACK = 0）
         update_stocks_excel()
+        update_index_excel()
