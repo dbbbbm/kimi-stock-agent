@@ -495,11 +495,14 @@ if __name__ == '__main__':
                 update_index_excel()
                 time.sleep(1)  # 批次间延时
             print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
+        elif sys.argv[1] == '--archive':
+            print("每日归档模式")
+            update_stocks_excel(save_to_data_dir=True)
+            update_index_excel(save_to_data_dir=True)
         else:
-            print("未知参数，使用默认模式")
-            update_stocks_excel()
-            update_index_excel()
+            pass
+        
     else:
         # 正常更新数据（DAYS_BACK = 0）
-        update_stocks_excel()
-        update_index_excel()
+        update_stocks_excel(save_to_data_dir=False)
+        update_index_excel(save_to_data_dir=False)

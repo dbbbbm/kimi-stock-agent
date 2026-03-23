@@ -332,7 +332,6 @@ def read_stocks_xlsx() -> list:
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", cwd=str(BASE_DIR), timeout=30,
         )
-        print(result)
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return data.get("data", [])
@@ -392,6 +391,7 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
     try:
         proc = subprocess.Popen(
             claude_args,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -402,6 +402,7 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
         for line in proc.stdout:
             append_claude(line)
         proc.wait()
+        _init_console_input()   # restore console mode after claude may have changed it
         code = proc.returncode
         append_claude(f"{'─'*60}")
         append_claude(f"■  完成  退出码={code}  [{datetime.now().strftime('%H:%M:%S')}]")
@@ -435,6 +436,15 @@ def trigger_archive(cfg: dict, cmd: str, reason: str) -> None:
 
 
 # ─── Scheduled jobs ───────────────────────────────────────────────────────────
+
+def check_market_open(cfg: dict) -> None:
+    global market_status
+    with _lock:
+        if not is_market_open(cfg):
+            market_status = "休市"
+        else:
+            market_status = "交易中"
+
 
 def job_fetch_and_check(cfg: dict, state: dict) -> None:
     global stock_rows, last_fetch_time, last_fetch_ok, market_status, portfolio_codes, positions_cache, available_cash
@@ -526,6 +536,16 @@ def job_operate(cfg: dict) -> None:
 
 
 def job_daily_archive(cfg: dict) -> None:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py"), '--archive'],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", cwd=str(BASE_DIR), timeout=120,
+        )
+        ok = result.returncode == 0
+    except Exception as e:
+        log_event(f"每日拉取收盘价失败：{e}")
+
     trigger_archive(cfg, "/daily_archive", "收盘触发 /daily_archive")
 
 
@@ -868,6 +888,7 @@ def schedule_thread(cfg: dict, state: dict) -> None:
     warc_t    = cfg["weekly_archive_time"]
     operate_time_list = cfg["operate_time_list"]
 
+    schedule.every(5).seconds.do(check_market_open, cfg=cfg)
     schedule.every(iv).seconds.do(job_fetch_and_check, cfg=cfg, state=state)
     for opr_t in operate_time_list:
         schedule.every().day.at(opr_t).do(job_operate,    cfg=cfg)
