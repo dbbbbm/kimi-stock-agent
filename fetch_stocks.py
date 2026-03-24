@@ -228,7 +228,7 @@ def get_index_data(symbol, name):
     try:
         end_date = datetime.now() - timedelta(days=DAYS_BACK)
 
-        df = ak.stock_zh_index_daily(symbol=symbol)
+        df = ak.stock_zh_index_daily_em(symbol=symbol)
         df['date'] = pd.to_datetime(df['date'])
         df = df[df['date'] <= end_date].tail(60).copy()
         df = df.rename(columns={

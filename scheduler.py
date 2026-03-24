@@ -39,6 +39,7 @@ _VK_BACK             = 0x08
 _VK_ESCAPE           = 0x1B
 _VK_UP               = 0x26
 _VK_DOWN             = 0x28
+_VK_DELETE           = 0x2E
 _FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001
 _ENABLE_QUICK_EDIT_MODE       = 0x0040   # must be disabled to receive mouse events
 
@@ -853,6 +854,12 @@ def input_thread_func(cfg: dict) -> None:
                 elif vk == _VK_ESCAPE:                      # Escape → clear
                     with _lock:
                         input_buffer = ""
+                elif vk == _VK_DELETE:                      # Delete → clear focused panel
+                    with _lock:
+                        if focused_panel == "claude":
+                            claude_buf.clear()
+                        elif focused_panel == "events":
+                            event_log.clear()
                 elif ch and ch.isprintable():               # Printable char
                     with _lock:
                         input_buffer += ch
