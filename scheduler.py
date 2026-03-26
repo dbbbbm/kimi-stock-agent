@@ -167,14 +167,7 @@ _EVENTS_VISIBLE = 28   # keep in sync with _PANEL_VISIBLE["events"]
 
 def log_event(msg: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
-    with _lock:
-        prev_len = len(event_log)
-        event_log.append(f"[{ts}] {msg}")
-        # Auto-scroll if user was at (or near) the bottom
-        was_at_bottom = scroll_offsets["events"] >= max(0, prev_len - _EVENTS_VISIBLE - 2)
-        if was_at_bottom:
-            scroll_offsets["events"] = max(0, len(event_log) - _EVENTS_VISIBLE)
-
+    event_log.append(f"[{ts}] {msg}")
 
 _CLAUDE_VISIBLE = 35   # visible lines in claude panel
 
@@ -805,7 +798,7 @@ def render(cfg: dict) -> Layout:
 
 def input_thread_func(cfg: dict) -> None:
     """Handle keyboard + mouse wheel via Windows ReadConsoleInputW."""
-    global input_buffer, session_date, focused_panel
+    global input_buffer, session_date, focused_panel, stock_rows
 
     # Wait for rich.Live to finish its console setup, then override
     time.sleep(1.5)
@@ -843,6 +836,20 @@ def input_thread_func(cfg: dict) -> None:
                         st["session_date"] = ""
                         save_state(st)
                         log_event("已重置 session，下次发送将创建新对话")
+                    elif text == "/update":
+                        log_event("手动更新股票数据...")
+                        try:
+                            subprocess.run(
+                                [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py")],
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", cwd=str(BASE_DIR), timeout=120,)
+                        except Exception as e:
+                            log_event("更新失败")
+                        finally:
+                            with _lock:
+                                stock_rows = read_stocks_xlsx()
+                            log_event("更新成功")
+                            
                     elif text:
                         log_event(f"用户发送：{text[:50]}")
                         threading.Thread(
