@@ -99,6 +99,9 @@ CONFIG_FILE = BASE_DIR / "scheduler_config.json"
 STATE_FILE  = BASE_DIR / "scheduler_state.json"
 STOCKS_FILE = BASE_DIR / "stocks.xlsx"
 MY_MD_FILE  = BASE_DIR / "MY.md"
+OPERATE_OUTPUT_DIR = BASE_DIR / "operate_logs"
+OPERATE_OUTPUT_FILE = OPERATE_OUTPUT_DIR / "last_operate_output.txt"
+NOTIFICATION_FLAG = BASE_DIR / "operate_notification.flag"
 
 # ─── Shared state (lock-protected) ────────────────────────────────────────────
 
@@ -382,6 +385,9 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
     append_claude(f"▶  {cmd}  [{datetime.now().strftime('%H:%M:%S')}]  {session_note}")
     append_claude(f"{'─'*60}")
 
+    # 收集输出用于保存到文件
+    output_lines = []
+
     try:
         proc = subprocess.Popen(
             claude_args,
@@ -395,12 +401,34 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
         )
         for line in proc.stdout:
             append_claude(line)
+            output_lines.append(line)
         proc.wait()
         _init_console_input()   # restore console mode after claude may have changed it
         code = proc.returncode
         append_claude(f"{'─'*60}")
         append_claude(f"■  完成  退出码={code}  [{datetime.now().strftime('%H:%M:%S')}]")
         log_event(f"{cmd} 完成（exit={code}）")
+
+        # 如果是 /operate 命令，保存输出到文件并创建通知标记
+        if "/operate" in cmd:
+            try:
+                # 确保目录存在
+                OPERATE_OUTPUT_DIR.mkdir(exist_ok=True)
+
+                # 写入输出文件
+                with open(OPERATE_OUTPUT_FILE, "w", encoding="utf-8") as f:
+                    f.write(f"命令: {cmd}\n")
+                    f.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"会话: {session_note}\n")
+                    f.write(f"退出码: {code}\n")
+                    f.write("=" * 60 + "\n\n")
+                    f.writelines(output_lines)
+
+                log_event(f"✓ 输出已保存到 {OPERATE_OUTPUT_FILE}")
+                append_claude(f"[dim]✓ 输出已保存到 operate_logs/last_operate_output.txt[/]")
+            except Exception as e:
+                log_event(f"保存输出文件失败: {e}")
+
     except FileNotFoundError:
         append_claude("✗  找不到 claude 命令 —— 请确认 Claude Code CLI 已安装并在 PATH 中")
         log_event(f"{cmd} 失败：找不到 claude")

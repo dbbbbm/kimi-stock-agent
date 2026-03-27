@@ -9,9 +9,7 @@
       "Bash(done)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Write(MY.md)",
-      "Write(HISTORY.md)",
-      "Write(*.md)",
+      "Edit(*.md)",
       "Bash(git add:*)"
     ]
   },
