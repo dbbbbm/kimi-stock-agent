@@ -123,7 +123,7 @@ scroll_offsets: dict  = {"claude": 9999, "events": 9999, "stocks": 0, "pnl": 0}
 focused_panel: str    = "claude"    # panel currently selected for keyboard scrolling
 positions_cache: dict = {}          # {code: {name, shares, cost}} from MY.md
 available_cash: float = 0.0         # parsed from MY.md 资金情况
-INITIAL_CAPITAL: float = 1_000_000.0
+INITIAL_CAPITAL: float = 150_000.0
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -606,6 +606,7 @@ def build_header(cfg: dict) -> Panel:
 def build_stock_table() -> Panel:
     with _lock:
         rows = list(stock_rows)
+        rows = sorted(rows, key=lambda row: row.get("涨跌幅"), reverse=True)
         portfolio = list(portfolio_codes)
 
     table = Table(box=box.SIMPLE_HEAD, show_header=True,
