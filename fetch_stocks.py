@@ -128,6 +128,43 @@ def calculate_volume_ma(df, period=20):
     return None
 
 
+def calculate_kdj(df, n=9, m1=3, m2=3):
+    """
+    计算 KDJ 指标
+    参数:
+        n: RSV 计算周期（默认9）
+        m1: K 线平滑因子（默认3）
+        m2: D 线平滑因子（默认3）
+    返回:
+        K, D, J 的最新值
+    """
+    try:
+        if len(df) < n:
+            return None, None, None
+
+        # 确保收盘价、最高价、最低价为数值类型
+        closes = df['收盘'].astype(float)
+        highs = df['最高'].astype(float)
+        lows = df['最低'].astype(float)
+
+        # 计算 RSV
+        rsv = (
+            (closes - lows.rolling(window=n, min_periods=n).min())
+            / (highs.rolling(window=n, min_periods=n).max() - lows.rolling(window=n, min_periods=n).min())
+            * 100
+        )
+
+        # 计算 K 和 D（指数平滑）
+        k = rsv.ewm(com=m1 - 1, adjust=False).mean()
+        d = k.ewm(com=m2 - 1, adjust=False).mean()
+        j = 3 * k - 2 * d
+
+        return round(k.iloc[-1], 2), round(d.iloc[-1], 2), round(j.iloc[-1], 2)
+    except Exception as e:
+        print(f"计算 KDJ 失败: {e}")
+        return None, None, None
+
+
 def get_stock_data(code, name=None):
     """
     获取单只股票的完整数据
@@ -157,6 +194,7 @@ def get_stock_data(code, name=None):
     mas = calculate_ma(df)
     macd_dif, macd_dea = calculate_macd(df)
     volume_ma = calculate_volume_ma(df)
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df)
 
     # 计算涨跌幅
     prev_close = df.iloc[-2]['收盘'] if len(df) > 1 else latest['收盘']
@@ -176,6 +214,9 @@ def get_stock_data(code, name=None):
         '均量(万)': volume_ma,
         'MACD_DIF': macd_dif,
         'MACD_DEA': macd_dea,
+        'KDJ_K': kdj_k,
+        'KDJ_D': kdj_d,
+        'KDJ_J': kdj_j,
         '涨跌幅': change_pct,
         '最高价': round(latest['最高'], 2),
         '最低价': round(latest['最低'], 2),
@@ -183,7 +224,6 @@ def get_stock_data(code, name=None):
         '换手率': latest.get('换手率', None),
         '量比': volume_ratio,
         '更新日期': data_date.strftime('%Y-%m-%d'),
-        'DAYS_BACK': DAYS_BACK
     }
 
     print(f"  ✅ 获取成功: {result['股票名称']} 现价:{result['现价']}")
@@ -399,7 +439,8 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
     # 4. 调整列顺序（让重要信息在前面）
     priority_cols = [
         '股票代码', '股票名称', '现价', '涨跌幅', 'MA5', 'MA10', 'MA20',
-        'MACD_DIF', 'MACD_DEA', '成交量(万)', '均量(万)', '量比',
+        'MACD_DIF', 'MACD_DEA', 'KDJ_K', 'KDJ_D', 'KDJ_J',
+        '成交量(万)', '均量(万)', '量比',
         '开盘价', '最高价', '最低价', '换手率'
     ]
 
@@ -492,7 +533,7 @@ if __name__ == '__main__':
                 data_date = datetime.now() - timedelta(days=DAYS_BACK)
                 print(f"\n[{i}/{len(offsets)}] {data_date.strftime('%Y-%m-%d')}")
                 update_stocks_excel()
-                update_index_excel()
+                # update_index_excel()
                 time.sleep(1)  # 批次间延时
             print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
         elif sys.argv[1] == '--archive':

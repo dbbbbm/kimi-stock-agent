@@ -215,7 +215,7 @@ def _get_panel_at(x: int, y: int) -> str | None:
         return "claude" if x < mid_x else "events"
 
 
-_PANEL_VISIBLE = {"claude": 35, "events": 28, "stocks": 15, "pnl": 10}
+_PANEL_VISIBLE = {"claude": 35, "events": 28, "stocks": 11, "pnl": 10}
 
 
 def _scroll_panel(panel: str, direction: int) -> None:
@@ -654,7 +654,7 @@ def build_stock_table() -> Panel:
         focused = focused_panel == "stocks"
     suffix = f" ↕{off}" if off else ""
     focus_tag = " [bold white]◀[/]" if focused else ""
-    title = f"[bold]股票池[/]（[cyan]{len(rows)}[/] 只，持仓 [yellow]{len(portfolio)}[/] 只）{suffix}{focus_tag}"
+    title = f"[bold]股票池[/]（[cyan]{len(stock_rows)}[/] 只，持仓 [yellow]{len(portfolio)}[/] 只）{suffix}{focus_tag}"
     return Panel(table, title=title, border_style="bright_blue" if focused else "blue")
 
 
@@ -961,6 +961,7 @@ def main() -> None:
 
     # seed stock display from existing xlsx (no blocking fetch at startup)
     rows = read_stocks_xlsx()
+    print(len(rows))
     if not rows:
         exit(0)
     if rows:

@@ -30,7 +30,6 @@ def xlsx_to_json(file_path):
         # 输出JSON格式
         result = {
             "source_file": file_path,
-            "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total_records": len(records),
             "columns": df.columns.tolist(),
             "data": records
