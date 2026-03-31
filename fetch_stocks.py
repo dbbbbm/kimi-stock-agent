@@ -20,32 +20,119 @@ from datetime import datetime, timedelta
 import time
 import warnings
 import os
+import requests
+import json
 warnings.filterwarnings('ignore')
+
+# ---------- 代理管理 ----------
+PROXY_FILE = 'proxy.json'
+PROXY_API_URL = os.environ.get('PROXY_API_URL')
+PROXIES = {}
+
+
+def fetch_proxy_from_api():
+    """从代理API获取新代理"""
+    if not PROXY_API_URL:
+        print('没有代理，使用直连模式')
+        return None
+    try:
+        resp = requests.get(PROXY_API_URL, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('code') == 'SUCCESS' and data.get('data'):
+            server = data['data'][0]['server']  # e.g. "103.217.191.12:30177"
+            proxy_url = f"http://{server}"
+            return proxy_url
+    except Exception as e:
+        print(f"获取代理失败: {e}")
+    return None
+
+
+def save_proxy(proxy_url):
+    """保存代理到本地文件"""
+    try:
+        with open(PROXY_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'proxy_url': proxy_url}, f)
+    except Exception as e:
+        print(f"保存代理失败: {e}")
+
+
+def refresh_proxy():
+    """刷新代理：从API获取新的并保存"""
+    global PROXIES
+    print("正在获取新代理...")
+    proxy_url = fetch_proxy_from_api()
+    if proxy_url:
+        save_proxy(proxy_url)
+        PROXIES = {'http': proxy_url, 'https': proxy_url}
+        print(f"已切换代理: {proxy_url}")
+        return PROXIES
+    else:
+        print("获取新代理失败，将尝试直连")
+        PROXIES = {}
+        return PROXIES
+
+
+def load_proxy():
+    """从本地文件加载代理，如果没有则获取新的"""
+    global PROXIES
+    if os.path.exists(PROXY_FILE):
+        try:
+            with open(PROXY_FILE, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+                proxy_url = saved.get('proxy_url')
+                if proxy_url:
+                    PROXIES = {'http': proxy_url, 'https': proxy_url}
+                    print(f"已加载本地代理: {proxy_url}")
+                    return PROXIES
+        except Exception as e:
+            print(f"加载本地代理失败: {e}")
+    return refresh_proxy()
+
+
+def ak_call(func, *args, **kwargs):
+    """带代理重试机制的 akshare 调用封装"""
+    global PROXIES
+    last_error = None
+    retries = 5
+    try:
+        return func(*args, **kwargs)
+    except:
+        print('直连失败，使用代理')
+    for attempt in range(retries):
+        kwargs['proxies'] = PROXIES
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            print(f"调用失败 (attempt {attempt + 1}/{retries}): {e}")
+            if attempt < retries - 1:
+                refresh_proxy()
+                time.sleep(1)
+    raise last_error
+
+# ------------------------------
 
 
 def normalize_stock_code(code):
     """
     标准化股票代码，处理6位数字格式
-    沪市(600/601/603/688等)加前缀 sh
-    深市(000/001/002/300等)加前缀 sz
     """
     code = str(code).strip().zfill(6)
     return code
 
 
-def get_stock_individual(code):
-    """获取个股基本信息"""
-    try:
-        code = normalize_stock_code(code)
-        # 获取实时行情
-        df = ak.stock_zh_a_spot_em()
-        stock_info = df[df['代码'] == code]
-        if stock_info.empty:
-            return None
-        return stock_info.iloc[0]
-    except Exception as e:
-        print(f"获取 {code} 基本信息失败: {e}")
-        return None
+def get_prefixed_code(code):
+    """
+    返回带 sh/sz 前缀的股票代码，用于 stock_zh_a_daily 等需要前缀的接口
+    """
+    code = normalize_stock_code(code)
+    if code.startswith('6'):
+        return f'sh{code}'
+    elif code.startswith(('0', '3')):
+        return f'sz{code}'
+    else:
+        raise ValueError(f"无法识别的市场前缀: {code}")
 
 
 def get_stock_daily(code, days=60):
@@ -63,13 +150,31 @@ def get_stock_daily(code, days=60):
         start_date = end_date - timedelta(days=days)
 
         # 使用 akshare 获取历史数据
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start_date.strftime('%Y%m%d'),
-            end_date=end_date.strftime('%Y%m%d'),
-            adjust="qfq"  # 前复权
-        )
+        if not DAYS_BACK:
+            df = ak_call(
+                ak.stock_zh_a_hist,
+                symbol=code,
+                period="daily",
+                start_date=start_date.strftime('%Y%m%d'),
+                end_date=end_date.strftime('%Y%m%d'),
+                adjust="qfq"  # 前复权
+            )
+        else:
+            # 使用 stock_zh_a_daily 获取回溯数据（东财接口被封后的备选）
+            df = ak.stock_zh_a_daily(
+                symbol=get_prefixed_code(code),
+                start_date=start_date.strftime('%Y%m%d'),
+                end_date=end_date.strftime('%Y%m%d'),
+                adjust="qfq"
+            )
+            df = df.rename(columns={
+                'date': '日期',
+                'open': '开盘',
+                'high': '最高',
+                'low': '最低',
+                'close': '收盘',
+                'volume': '成交量'
+            })
 
         if df.empty:
             return None
@@ -268,7 +373,7 @@ def get_index_data(symbol, name):
     try:
         end_date = datetime.now() - timedelta(days=DAYS_BACK)
 
-        df = ak.stock_zh_index_daily_em(symbol=symbol)
+        df = ak_call(ak.stock_zh_index_daily_em, symbol=symbol)
         df['date'] = pd.to_datetime(df['date'])
         df = df[df['date'] <= end_date].tail(60).copy()
         df = df.rename(columns={
@@ -300,8 +405,10 @@ def get_index_data(symbol, name):
             '成交量(万)': round(latest['成交量'] / 10000, 2),
             '均量(万)': volume_ma,
             '量比': volume_ratio,
+            '最低价': round(latest['最低'], 2),
+            '最高价': round(latest['最高'], 2),
+            '开盘价': round(latest['开盘'], 2),
             '更新日期': end_date.strftime('%Y-%m-%d'),
-            'DAYS_BACK': DAYS_BACK,
         }
     except Exception as e:
         print(f"获取 {name}({symbol}) 失败: {e}")
@@ -328,7 +435,7 @@ def update_index_excel(output_file='index.xlsx', save_to_data_dir=True):
             print(f"  ✅ {idx['name']} 现价:{data['现价']} 涨跌幅:{data['涨跌幅']}%")
         else:
             print(f"  ❌ {idx['name']} 获取失败")
-        time.sleep(0.3)
+        time.sleep(5)
 
     if not index_data:
         print("❌ 所有指数数据获取失败")
@@ -337,8 +444,9 @@ def update_index_excel(output_file='index.xlsx', save_to_data_dir=True):
     df_index = pd.DataFrame(index_data)
 
     try:
-        df_index.to_excel(output_file, index=False, sheet_name='大盘指标')
-        print(f"\n✅ 大盘指标已保存: {output_file}")
+        if not DAYS_BACK:
+            df_index.to_excel(output_file, index=False, sheet_name='大盘指标')
+            print(f"\n✅ 大盘指标已保存: {output_file}")
 
         if save_to_data_dir:
             data_dir = 'indices'
@@ -431,7 +539,7 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
             updated_data.append(row.to_dict())
 
         # 延时，避免请求过快
-        time.sleep(0.5)
+        time.sleep(2)
 
     # 3. 创建新的 DataFrame
     df_updated = pd.DataFrame(updated_data)
@@ -455,7 +563,8 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
     # 5. 保存到 Excel
     try:
         # 5.1 保存最新版本（覆盖原文件）
-        df_updated.to_excel(output_file, index=False, sheet_name='股票池')
+        if not DAYS_BACK:
+            df_updated.to_excel(output_file, index=False, sheet_name='股票池')
 
         # 5.2 保存带时间戳的版本到data目录
         if save_to_data_dir and timestamp_file_path:
@@ -506,6 +615,9 @@ def create_sample_excel(filename='stocks.xlsx'):
 if __name__ == '__main__':
     import sys
 
+    # 启动时加载代理
+    load_proxy()
+
     # 检查参数
     if len(sys.argv) > 1:
         if sys.argv[1] == '--create-sample':
@@ -533,8 +645,8 @@ if __name__ == '__main__':
                 data_date = datetime.now() - timedelta(days=DAYS_BACK)
                 print(f"\n[{i}/{len(offsets)}] {data_date.strftime('%Y-%m-%d')}")
                 update_stocks_excel()
-                # update_index_excel()
-                time.sleep(1)  # 批次间延时
+                update_index_excel()
+                time.sleep(10)  # 批次间延时
             print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
         elif sys.argv[1] == '--archive':
             print("每日归档模式")
