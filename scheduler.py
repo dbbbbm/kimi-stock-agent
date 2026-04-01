@@ -487,7 +487,7 @@ def job_fetch_and_check(cfg: dict, state: dict) -> None:
         result = subprocess.run(
             [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py")],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", cwd=str(BASE_DIR), timeout=120,
+            errors="replace", cwd=str(BASE_DIR), timeout=240,
         )
         ok = result.returncode == 0
     except Exception as e:
@@ -560,7 +560,7 @@ def job_operate(cfg: dict) -> None:
     result = subprocess.run(
         [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py")],
         capture_output=True, text=True, encoding="utf-8",
-        errors="replace", cwd=str(BASE_DIR), timeout=120,
+        errors="replace", cwd=str(BASE_DIR), timeout=240,
     )
 
     trigger_operate(cfg, "定时触发 /operate")
@@ -571,7 +571,7 @@ def job_daily_archive(cfg: dict) -> None:
         result = subprocess.run(
             [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py"), '--archive'],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", cwd=str(BASE_DIR), timeout=120,
+            errors="replace", cwd=str(BASE_DIR), timeout=240,
         )
         ok = result.returncode == 0
     except Exception as e:
@@ -880,7 +880,7 @@ def input_thread_func(cfg: dict) -> None:
                             subprocess.run(
                                 [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py")],
                                 capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", cwd=str(BASE_DIR), timeout=120,)
+                                errors="replace", cwd=str(BASE_DIR), timeout=240,)
                         except Exception as e:
                             log_event("更新失败")
                         finally:
