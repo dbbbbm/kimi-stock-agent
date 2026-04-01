@@ -1,9 +1,8 @@
 {
   "price_move_threshold_pct": 1.0,
   "operate_cooldown_minutes": 30,
-  "fetch_interval_seconds": 300,
-  "market_open": "09:30",
-  "market_close": "15:00",
+  "fetch_interval_seconds": -1,
+  "market_open": [["09:30", "11:30"], ["13:00", "15:00"]],
   "archive_time": "15:05",
   "weekly_archive_time": "15:15",
   "operate_time_list": ["11:00", "14:00"],
