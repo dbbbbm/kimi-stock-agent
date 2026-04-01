@@ -238,9 +238,12 @@ def is_market_open(cfg: dict) -> bool:
     if now.weekday() >= 5:
         return False
     t = now.time()
-    oh, om = map(int, cfg["market_open"].split(":"))
-    ch, cm = map(int, cfg["market_close"].split(":"))
-    return dtime(oh, om) <= t <= dtime(ch, cm)
+    for open, close in cfg['market_open']:
+        oh, om = map(int, open.split(":"))
+        ch, cm = map(int, close.split(":"))
+        if dtime(oh, om) <= t <= dtime(ch, cm):
+            return True
+    return False
 
 
 def refresh_portfolio_codes() -> list:
@@ -554,6 +557,12 @@ def job_fetch_and_check(cfg: dict, state: dict) -> None:
 
 
 def job_operate(cfg: dict) -> None:
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", str(BASE_DIR / "fetch_stocks.py")],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", cwd=str(BASE_DIR), timeout=120,
+    )
+
     trigger_operate(cfg, "定时触发 /operate")
 
 
@@ -932,11 +941,14 @@ def schedule_thread(cfg: dict, state: dict) -> None:
     operate_time_list = cfg["operate_time_list"]
 
     schedule.every(5).seconds.do(check_market_open, cfg=cfg)
-    schedule.every(iv).seconds.do(job_fetch_and_check, cfg=cfg, state=state)
+    if iv > 0:
+        schedule.every(iv).seconds.do(job_fetch_and_check, cfg=cfg, state=state)
     for opr_t in operate_time_list:
         schedule.every().day.at(opr_t).do(job_operate,    cfg=cfg)
     schedule.every().day.at(arc_t).do(job_daily_archive,   cfg=cfg)
     schedule.every().friday.at(warc_t).do(job_weekly_archive, cfg=cfg)
+    for fetch_t in ["09:31", "11:31", "13:01"]:
+        schedule.every().day.at(fetch_t).do(job_fetch_and_check, cfg=cfg, state=state)
 
     log_event(
         f"调度器就绪 | 拉取:{iv}s | 定时操作:{operate_time_list} | "
