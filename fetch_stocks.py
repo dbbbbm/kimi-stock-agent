@@ -28,7 +28,7 @@ warnings.filterwarnings('ignore')
 PROXY_FILE = 'proxy.json'
 PROXY_API_URL = os.environ.get('PROXY_API_URL')
 PROXIES = {}
-
+ENABLE_DIRECT_CONNECT_FIRST = False # 是否先尝试直连
 
 def fetch_proxy_from_api():
     """从代理API获取新代理"""
@@ -92,13 +92,14 @@ def load_proxy():
 
 def ak_call(func, *args, **kwargs):
     """带代理重试机制的 akshare 调用封装"""
-    global PROXIES
+    global PROXIES, ENABLE_DIRECT_CONNECT_FIRST
     last_error = None
     retries = 5
-    try:
-        return func(*args, **kwargs)
-    except:
-        print('直连失败，使用代理')
+    if ENABLE_DIRECT_CONNECT_FIRST:
+        try:
+            return func(*args, **kwargs)
+        except:
+            print('直连失败，使用代理')
     for attempt in range(retries):
         kwargs['proxies'] = PROXIES
         try:
