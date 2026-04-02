@@ -372,11 +372,13 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
 
     # Decide whether to continue today's session or start a new one
     today = datetime.now().strftime("%Y-%m-%d")
+    now_t = datetime.now().strftime('%H:%M:%S')
+    cmd_str = f'{cmd} 现在是{now_t}'
     if session_date == today:
-        claude_args = ["claude", "--continue", "-p", cmd]
+        claude_args = ["claude", "--continue", "-p", cmd_str]
         session_note = "续接今日会话"
     else:
-        claude_args = ["claude", "-p", cmd]
+        claude_args = ["claude", "-p", cmd_str]
         session_note = "新建会话"
         session_date = today
         state = load_state()
@@ -385,7 +387,7 @@ def run_claude_command(cmd: str, cfg: dict) -> None:
 
     log_event(f"启动 → {cmd}（{session_note}）")
     append_claude(f"{'─'*60}")
-    append_claude(f"▶  {cmd}  [{datetime.now().strftime('%H:%M:%S')}]  {session_note}")
+    append_claude(f"▶  {cmd}  [{now_t}]  {session_note}")
     append_claude(f"{'─'*60}")
 
     # 收集输出用于保存到文件
