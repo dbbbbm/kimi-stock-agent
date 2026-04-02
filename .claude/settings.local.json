@@ -10,6 +10,7 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Edit(*.md)",
+      "Edit(tmp)",
       "Bash(git add:*)",
       "Bash(:)"
     ]
