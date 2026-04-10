@@ -136,7 +136,7 @@ def get_prefixed_code(code):
         raise ValueError(f"无法识别的市场前缀: {code}")
 
 
-def get_stock_daily(code, days=60):
+def get_stock_daily(code, days=120):
     """
     获取股票历史日线数据
     返回包含最近N天数据的DataFrame
@@ -227,6 +227,51 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
         return None, None
 
 
+def calculate_macd_2(df, fast=12, slow=26, signal=9):
+    """
+    计算 MACD 指标（使用 SMA 初始化 EMA）
+    某些股票软件使用 SMA 作为 EMA 的初始值，可能导致结果差异
+    返回: DIF, DEA, MACD柱状图
+    """
+    try:
+        if len(df) < slow + signal:
+            return None, None
+
+        closes = pd.Series(df['收盘'].values)
+
+        def ema_with_sma_init(data, span):
+            """使用 SMA 作为初始值的 EMA 计算"""
+            # 前 span 天的 SMA 作为初始 EMA 值
+            sma_init = data.iloc[:span].mean()
+            # 从第 span 天开始，使用 EMA 公式
+            ema_values = [sma_init]
+            multiplier = 2 / (span + 1)
+            for price in data.iloc[span:]:
+                ema_values.append(price * multiplier + ema_values[-1] * (1 - multiplier))
+            return pd.Series(ema_values, index=data.index[span - 1:])
+
+        # 计算 EMA(fast) 和 EMA(slow)
+        ema_fast = ema_with_sma_init(closes, fast)
+        ema_slow = ema_with_sma_init(closes, slow)
+
+        # 对齐索引，计算 DIF
+        common_index = ema_fast.index.intersection(ema_slow.index)
+        dif = ema_fast.loc[common_index] - ema_slow.loc[common_index]
+
+        # 计算 DEA (DIF 的 EMA)
+        dea = ema_with_sma_init(dif, signal)
+
+        # 对齐 DIF 和 DEA
+        common_index2 = dif.index.intersection(dea.index)
+        dif_aligned = dif.loc[common_index2]
+        dea_aligned = dea.loc[common_index2]
+
+        return round(dif_aligned.iloc[-1], 3), round(dea_aligned.iloc[-1], 3)
+    except Exception as e:
+        print(f"计算 MACD (SMA版) 失败: {e}")
+        return None, None
+
+
 def calculate_volume_ma(df, period=20):
     """计算成交量均线"""
     if len(df) >= period:
@@ -288,7 +333,7 @@ def get_stock_data(code, name=None):
         print(f"正在获取 {code} {name or ''} 的数据...")
 
     # 获取历史数据
-    df = get_stock_daily(code, days=60)
+    df = get_stock_daily(code, days=120)
     if df is None or df.empty:
         print(f"  ❌ 无法获取 {code} 的数据")
         return None

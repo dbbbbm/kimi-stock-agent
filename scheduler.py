@@ -473,9 +473,8 @@ def check_market_open(cfg: dict) -> None:
             market_status = "交易中"
 
 
-def job_fetch_and_check(cfg: dict, state: dict) -> None:
+def job_fetch_and_check(cfg: dict, state: dict, analysis: bool=False) -> None:
     global stock_rows, last_fetch_time, last_fetch_ok, market_status, portfolio_codes, positions_cache, available_cash
-
     if not is_market_open(cfg):
         with _lock:
             market_status = "休市"
@@ -556,6 +555,10 @@ def job_fetch_and_check(cfg: dict, state: dict) -> None:
     # 7. trigger
     if triggered:
         trigger_operate(cfg, f"波动触发 {', '.join(triggered)}，执行 /operate")
+    elif analysis:
+        threading.Thread(
+            target=run_claude_command, args=("/analysis", cfg), daemon=True
+        ).start()
 
 
 def job_operate(cfg: dict) -> None:
@@ -950,7 +953,7 @@ def schedule_thread(cfg: dict, state: dict) -> None:
     schedule.every().day.at(arc_t).do(job_daily_archive,   cfg=cfg)
     schedule.every().friday.at(warc_t).do(job_weekly_archive, cfg=cfg)
     for fetch_t in ["09:31", "11:31", "13:01"]:
-        schedule.every().day.at(fetch_t).do(job_fetch_and_check, cfg=cfg, state=state)
+        schedule.every().day.at(fetch_t).do(job_fetch_and_check, cfg=cfg, state=state, analysis=True)
 
     log_event(
         f"调度器就绪 | 拉取:{iv}s | 定时操作:{operate_time_list} | "
