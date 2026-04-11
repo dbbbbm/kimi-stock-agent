@@ -10,11 +10,12 @@
 
 ## 执行步骤
 
-1. 运行 `python batch_view.py stocks 6 > tmp/st.txt` 读取今天+最近6天股票数据
-2. 运行 `python batch_view.py index 6` 读取今天+最近6天大盘指数技术指标
-3. 读取 `MY.md` 了解当前持仓、成本、仓位、风控线
-4. 读取 `HISTORY.md` 回顾近期操作逻辑，避免重复错误
-5. 对每一支候选股生成技术分析：
+1. 运行 `python xlsx_to_table.py stocks.xlsx` 读取今日个股数据
+2. 运行 `ls -r data | head -6` 列出前6日历史个股数据，使用 `python xlsx_to_table.py` 逐一读取
+3. 运行 `python batch_view.py index 6` 读取最近7天大盘指数技术指标
+4. 读取 `MY.md` 了解当前持仓、成本、仓位、风控线
+5. 读取 `HISTORY.md` 回顾近期操作逻辑，避免重复错误
+6. 对每一支候选股生成技术分析：
    - MA：价格与各均线位置关系
    - MACD/DIF：方向、金叉死叉、背离
    - KDJ：K/D/J值、金叉死叉、超买超卖
