@@ -22,12 +22,15 @@ import warnings
 import os
 import requests
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings('ignore')
 
 # ---------- 代理管理 ----------
 PROXY_FILE = 'proxy.json'
 PROXY_API_URL = os.environ.get('PROXY_API_URL')
 PROXIES = {}
+proxy_lock = threading.Lock()
 ENABLE_DIRECT_CONNECT_FIRST = False # 是否先尝试直连
 
 def fetch_proxy_from_api():
@@ -62,15 +65,16 @@ def refresh_proxy():
     global PROXIES
     print("正在获取新代理...")
     proxy_url = fetch_proxy_from_api()
-    if proxy_url:
-        save_proxy(proxy_url)
-        PROXIES = {'http': proxy_url, 'https': proxy_url}
-        print(f"已切换代理: {proxy_url}")
-        return PROXIES
-    else:
-        print("获取新代理失败，将尝试直连")
-        PROXIES = {}
-        return PROXIES
+    with proxy_lock:
+        if proxy_url:
+            save_proxy(proxy_url)
+            PROXIES = {'http': proxy_url, 'https': proxy_url}
+            print(f"已切换代理: {proxy_url}")
+            return PROXIES
+        else:
+            print("获取新代理失败，将尝试直连")
+            PROXIES = {}
+            return PROXIES
 
 
 def load_proxy():
@@ -82,7 +86,8 @@ def load_proxy():
                 saved = json.load(f)
                 proxy_url = saved.get('proxy_url')
                 if proxy_url:
-                    PROXIES = {'http': proxy_url, 'https': proxy_url}
+                    with proxy_lock:
+                        PROXIES = {'http': proxy_url, 'https': proxy_url}
                     print(f"已加载本地代理: {proxy_url}")
                     return PROXIES
         except Exception as e:
@@ -101,7 +106,8 @@ def ak_call(func, *args, **kwargs):
         except:
             print('直连失败，使用代理')
     for attempt in range(retries):
-        kwargs['proxies'] = PROXIES
+        with proxy_lock:
+            kwargs['proxies'] = PROXIES
         try:
             return func(*args, **kwargs)
         except Exception as e:
@@ -472,16 +478,21 @@ def update_index_excel(output_file='index.xlsx', save_to_data_dir=True):
     print(f"大盘指数数据更新")
     print(f"{'='*60}\n")
 
+    print(f"并发拉取 {len(INDEX_LIST)} 只大盘指数...\n")
     index_data = []
-    for idx in INDEX_LIST:
-        print(f"正在获取 {idx['name']}({idx['symbol']})...")
-        data = get_index_data(idx['symbol'], idx['name'])
-        if data:
-            index_data.append(data)
-            print(f"  ✅ {idx['name']} 现价:{data['现价']} 涨跌幅:{data['涨跌幅']}%")
-        else:
-            print(f"  ❌ {idx['name']} 获取失败")
-        time.sleep(5)
+    with ThreadPoolExecutor(max_workers=len(INDEX_LIST)) as executor:
+        future_to_idx = {
+            executor.submit(get_index_data, idx['symbol'], idx['name']): idx
+            for idx in INDEX_LIST
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            data = future.result()
+            if data:
+                index_data.append(data)
+                print(f"  ✅ {idx['name']} 现价:{data['现价']} 涨跌幅:{data['涨跌幅']}%")
+            else:
+                print(f"  ❌ {idx['name']} 获取失败")
 
     if not index_data:
         print("❌ 所有指数数据获取失败")
@@ -509,7 +520,22 @@ def update_index_excel(output_file='index.xlsx', save_to_data_dir=True):
         print(f"保存 {output_file} 失败: {e}")
 
 
-def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data_dir=True):
+def _fetch_stock_task(args):
+    """单只股票拉取任务（供线程池调用）"""
+    code, name, row_dict, df_existing_columns = args
+    stock_data = get_stock_data(code, name)
+    if stock_data:
+        # 保留原有的字段（如所属行业、关注理由）
+        for col in df_existing_columns:
+            if col not in stock_data and col in row_dict:
+                stock_data[col] = row_dict[col]
+        return stock_data
+    else:
+        # 如果获取失败，保留原有数据
+        return row_dict
+
+
+def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data_dir=True, workers=5):
     """
     主函数：读取 stocks.xlsx，更新数据，写回文件
 
@@ -517,6 +543,7 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
         input_file: 输入文件路径
         output_file: 输出文件路径（默认覆盖input_file）
         save_to_data_dir: 是否同时保存带时间戳的版本到data目录
+        workers: 并发线程数
     """
     global DAYS_BACK
     if output_file is None:
@@ -560,9 +587,8 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
         print(f"读取文件失败: {e}")
         return
 
-    # 2. 获取每只股票的数据
-    updated_data = []
-
+    # 2. 构造任务列表并并发拉取
+    tasks = []
     for idx, row in df_existing.iterrows():
         code = str(row.get('股票代码', '')).strip()
         name = row.get('股票名称', '')
@@ -570,22 +596,13 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
         if not code or code == 'nan':
             continue
 
-        # 获取数据
-        stock_data = get_stock_data(code, name)
+        tasks.append((code, name, row.to_dict(), list(df_existing.columns)))
 
-        if stock_data:
-            # 保留原有的字段（如所属行业、关注理由）
-            for col in df_existing.columns:
-                if col not in stock_data and col in row:
-                    stock_data[col] = row[col]
-
-            updated_data.append(stock_data)
-        else:
-            # 如果获取失败，保留原有数据
-            updated_data.append(row.to_dict())
-
-        # 延时，避免请求过快
-        time.sleep(2)
+    print(f"启动 {workers} 个线程并发拉取 {len(tasks)} 只股票...\n")
+    updated_data = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(_fetch_stock_task, tasks)
+        updated_data = list(results)
 
     # 3. 创建新的 DataFrame
     df_updated = pd.DataFrame(updated_data)
@@ -659,49 +676,46 @@ def create_sample_excel(filename='stocks.xlsx'):
 
 
 if __name__ == '__main__':
-    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description='股票数据自动获取脚本')
+    parser.add_argument('--create-sample', action='store_true', help='创建示例 stocks.xlsx')
+    parser.add_argument('--index', action='store_true', help='只更新大盘指数')
+    parser.add_argument('--back', type=int, metavar='N', help='获取N天前的数据')
+    parser.add_argument('--get-recent', type=int, metavar='N', help='批量获取最近N个交易日')
+    parser.add_argument('--archive', action='store_true', help='每日归档模式')
+    parser.add_argument('--workers', type=int, default=4, help='并发线程数（默认5）')
+    args = parser.parse_args()
 
     # 启动时加载代理
     load_proxy()
 
-    # 检查参数
-    if len(sys.argv) > 1:
-        if sys.argv[1] == '--create-sample':
-            # 创建示例文件
-            create_sample_excel()
-        elif sys.argv[1] == '--index':
-            # 只更新大盘指数
-            # 用法: python fetch_stocks.py --index
+    if args.create_sample:
+        create_sample_excel()
+    elif args.index:
+        update_index_excel()
+    elif args.back is not None:
+        DAYS_BACK = args.back
+        print(f"🔄 获取 {DAYS_BACK} 天前的数据...")
+        update_stocks_excel(workers=args.workers)
+        update_index_excel()
+    elif args.get_recent is not None:
+        days = args.get_recent
+        print(f"🔄 批量获取最近 {days} 个交易日的历史数据（跳过非交易日）...\n")
+        offsets = get_recent_trading_offsets(days)
+        for i, offset in enumerate(offsets, 1):
+            DAYS_BACK = offset
+            data_date = datetime.now() - timedelta(days=DAYS_BACK)
+            print(f"\n[{i}/{len(offsets)}] {data_date.strftime('%Y-%m-%d')}")
+            update_stocks_excel(workers=args.workers)
             update_index_excel()
-        elif sys.argv[1] == '--back':
-            # 获取指定天数前的数据
-            # 用法: python fetch_stocks.py --back 3
-            DAYS_BACK = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-            print(f"🔄 获取 {DAYS_BACK} 天前的数据...")
-            update_stocks_excel()
-            update_index_excel()
-        elif sys.argv[1] == '--get-recent':
-            # 获取最近N个交易日的历史数据（跳过非交易日）
-            # 用法: python fetch_stocks.py --get-recent 7
-            days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-            print(f"🔄 批量获取最近 {days} 个交易日的历史数据（跳过非交易日）...\n")
-            offsets = get_recent_trading_offsets(days)
-            for i, offset in enumerate(offsets, 1):
-                DAYS_BACK = offset
-                data_date = datetime.now() - timedelta(days=DAYS_BACK)
-                print(f"\n[{i}/{len(offsets)}] {data_date.strftime('%Y-%m-%d')}")
-                update_stocks_excel()
-                update_index_excel()
-                time.sleep(10)  # 批次间延时
-            print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
-        elif sys.argv[1] == '--archive':
-            print("每日归档模式")
-            update_stocks_excel(save_to_data_dir=True)
-            update_index_excel(save_to_data_dir=True)
-        else:
-            pass
-        
+            time.sleep(10)  # 批次间延时
+        print(f"\n✅ 完成！共获取 {len(offsets)} 个交易日的历史数据")
+    elif args.archive:
+        print("每日归档模式")
+        update_stocks_excel(save_to_data_dir=True, workers=args.workers)
+        update_index_excel(save_to_data_dir=True)
     else:
         # 正常更新数据（DAYS_BACK = 0）
-        update_stocks_excel(save_to_data_dir=False)
+        update_stocks_excel(save_to_data_dir=False, workers=args.workers)
         update_index_excel(save_to_data_dir=False)
