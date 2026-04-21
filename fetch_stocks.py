@@ -322,6 +322,37 @@ def calculate_kdj(df, n=9, m1=3, m2=3):
         return None, None, None
 
 
+def calculate_rsi(df, period=14):
+    """
+    计算 RSI 指标（Wilder 平滑法）
+    参数:
+        period: 计算周期
+    返回:
+        RSI 最新值
+    """
+    try:
+        if len(df) < period + 1:
+            return None
+
+        closes = df['收盘'].astype(float)
+        delta = closes.diff()
+
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+
+        # Wilder's smoothing: alpha = 1 / period
+        avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+        return round(rsi.iloc[-1], 2)
+    except Exception as e:
+        print(f"计算 RSI({period}) 失败: {e}")
+        return None
+
+
 def get_stock_data(code, name=None):
     """
     获取单只股票的完整数据
@@ -352,6 +383,9 @@ def get_stock_data(code, name=None):
     macd_dif, macd_dea = calculate_macd(df)
     volume_ma = calculate_volume_ma(df)
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
+    rsi_6 = calculate_rsi(df, period=6)
+    rsi_12 = calculate_rsi(df, period=12)
+    rsi_24 = calculate_rsi(df, period=24)
 
     # 计算涨跌幅
     prev_close = df.iloc[-2]['收盘'] if len(df) > 1 else latest['收盘']
@@ -374,6 +408,9 @@ def get_stock_data(code, name=None):
         'KDJ_K': kdj_k,
         'KDJ_D': kdj_d,
         'KDJ_J': kdj_j,
+        'RSI_6': rsi_6,
+        'RSI_12': rsi_12,
+        'RSI_24': rsi_24,
         '涨跌幅': change_pct,
         '最高价': round(latest['最高'], 2),
         '最低价': round(latest['最低'], 2),
@@ -611,6 +648,7 @@ def update_stocks_excel(input_file='stocks.xlsx', output_file=None, save_to_data
     priority_cols = [
         '股票代码', '股票名称', '现价', '涨跌幅', 'MA5', 'MA10', 'MA20',
         'MACD_DIF', 'MACD_DEA', 'KDJ_K', 'KDJ_D', 'KDJ_J',
+        'RSI_6', 'RSI_12', 'RSI_24',
         '成交量(万)', '均量(万)', '量比',
         '开盘价', '最高价', '最低价', '换手率'
     ]

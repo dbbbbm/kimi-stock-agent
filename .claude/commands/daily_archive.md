@@ -14,7 +14,8 @@
 1. 运行 `python xlsx_to_table.py stocks.xlsx` 读取收盘价格
 2. 运行 `python xlsx_to_table.py index.xlsx` 读取今日大盘指数收盘数据
 3. 读取 `MY.md` 确认归档前的持仓基准状态
-4. **回顾本次会话中 `/analysis` 和 `/operate` 产生的所有分析结论与操作决策**，作为归档内容的核心来源
+4. 读取 `overview/` 目录下本日的大盘总结
+5. **回顾本次会话中 `/analysis` 和 `/operate` 产生的所有分析结论与操作决策**，作为归档内容的核心来源
 
 **第二步：更新 MY.md**
 - 以今日收盘价更新所有持仓的现价、市值、盈亏
