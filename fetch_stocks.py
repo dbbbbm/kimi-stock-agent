@@ -721,7 +721,7 @@ if __name__ == '__main__':
     parser.add_argument('--index', action='store_true', help='只更新大盘指数')
     parser.add_argument('--back', type=int, metavar='N', help='获取N天前的数据')
     parser.add_argument('--get-recent', type=int, metavar='N', help='批量获取最近N个交易日')
-    parser.add_argument('--archive', action='store_true', help='每日归档模式')
+    parser.add_argument('-a', '--archive', action='store_true', help='每日归档模式')
     parser.add_argument('--workers', type=int, default=4, help='并发线程数（默认5）')
     args = parser.parse_args()
 
